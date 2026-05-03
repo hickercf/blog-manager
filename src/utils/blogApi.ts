@@ -9,6 +9,7 @@ export interface Post {
   categories: string[];
   tags: string[];
   content: string;
+  status: "draft" | "published";
 }
 
 export interface Category {
@@ -75,6 +76,7 @@ export async function getPosts(blogPath: string): Promise<Post[]> {
           categories: frontmatter.categories || [],
           tags: frontmatter.tags || [],
           content,
+          status: "published",
         });
       }
     }
@@ -85,9 +87,52 @@ export async function getPosts(blogPath: string): Promise<Post[]> {
   }
 }
 
+export async function getDrafts(blogPath: string): Promise<Post[]> {
+  try {
+    const entries = await readDir(`${blogPath}/source/_drafts`);
+    const posts: Post[] = [];
+    for (const entry of entries) {
+      if (entry.name && entry.name.endsWith(".md")) {
+        const content = await readTextFile(`${blogPath}/source/_drafts/${entry.name}`);
+        const { frontmatter } = parseFrontmatter(content);
+        posts.push({
+          filename: entry.name,
+          title: frontmatter.title || entry.name,
+          date: frontmatter.date || "",
+          categories: frontmatter.categories || [],
+          tags: frontmatter.tags || [],
+          content,
+          status: "draft",
+        });
+      }
+    }
+    return posts.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  } catch {
+    return [];
+  }
+}
+
+export async function getAllPosts(blogPath: string): Promise<Post[]> {
+  const published = await getPosts(blogPath);
+  const drafts = await getDrafts(blogPath);
+  return [...published, ...drafts].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+}
+
 export async function getPost(blogPath: string, filename: string): Promise<Post | null> {
   try {
-    const content = await readTextFile(`${blogPath}/source/_posts/${filename}`);
+    // Try posts first, then drafts
+    let content = "";
+    let status: "draft" | "published" = "published";
+    try {
+      content = await readTextFile(`${blogPath}/source/_posts/${filename}`);
+    } catch {
+      try {
+        content = await readTextFile(`${blogPath}/source/_drafts/${filename}`);
+        status = "draft";
+      } catch {
+        return null;
+      }
+    }
     const { frontmatter, body } = parseFrontmatter(content);
     return {
       filename,
@@ -96,6 +141,7 @@ export async function getPost(blogPath: string, filename: string): Promise<Post 
       categories: frontmatter.categories || [],
       tags: frontmatter.tags || [],
       content: body,
+      status,
     };
   } catch (e) {
     console.error("Failed to read post:", e);
@@ -118,8 +164,104 @@ export async function savePost(
   await writeTextFile(`${blogPath}/source/_posts/${filename}`, fullContent);
 }
 
+export async function saveDraft(
+  blogPath: string,
+  filename: string,
+  post: { title: string; date: string; categories: string[]; tags: string[]; content: string }
+): Promise<void> {
+  const fm = buildFrontmatter({
+    title: post.title,
+    date: post.date,
+    categories: post.categories,
+    tags: post.tags,
+  });
+  const fullContent = fm + post.content;
+  try {
+    await readDir(`${blogPath}/source/_drafts`);
+  } catch {
+    // create _drafts directory if it doesn't exist
+    await writeTextFile(`${blogPath}/source/_drafts/.gitkeep`, "");
+  }
+  await writeTextFile(`${blogPath}/source/_drafts/${filename}`, fullContent);
+}
+
+export async function publishDraft(blogPath: string, filename: string): Promise<void> {
+  const content = await readTextFile(`${blogPath}/source/_drafts/${filename}`);
+  await writeTextFile(`${blogPath}/source/_posts/${filename}`, content);
+  await remove(`${blogPath}/source/_drafts/${filename}`);
+}
+
 export async function deletePost(blogPath: string, filename: string): Promise<void> {
   await remove(`${blogPath}/source/_posts/${filename}`);
+}
+
+export async function moveToTrash(blogPath: string, filename: string): Promise<void> {
+  const trashDir = `${blogPath}/.trash`;
+  try {
+    await readDir(trashDir);
+  } catch {
+    // trash dir doesn't exist, create it
+    await writeTextFile(`${trashDir}/.gitkeep`, "");
+  }
+  const content = await readTextFile(`${blogPath}/source/_posts/${filename}`);
+  const timestamp = new Date().toISOString().slice(0, 10);
+  const trashFilename = `${timestamp}_${filename}`;
+  await writeTextFile(`${trashDir}/${trashFilename}`, content);
+  await remove(`${blogPath}/source/_posts/${filename}`);
+}
+
+export async function getTrashItems(blogPath: string): Promise<{ filename: string; title: string; deletedDate: string }[]> {
+  try {
+    const entries = await readDir(`${blogPath}/.trash`);
+    const items: { filename: string; title: string; deletedDate: string }[] = [];
+    for (const entry of entries) {
+      if (entry.name && entry.name.endsWith(".md")) {
+        const content = await readTextFile(`${blogPath}/.trash/${entry.name}`);
+        const { frontmatter } = parseFrontmatter(content);
+        const parts = entry.name.split("_");
+        const deletedDate = parts[0] || "";
+        items.push({
+          filename: entry.name,
+          title: frontmatter.title || entry.name,
+          deletedDate,
+        });
+      }
+    }
+    return items.sort((a, b) => b.deletedDate.localeCompare(a.deletedDate));
+  } catch {
+    return [];
+  }
+}
+
+export async function restoreFromTrash(blogPath: string, trashFilename: string): Promise<void> {
+  const content = await readTextFile(`${blogPath}/.trash/${trashFilename}`);
+  const originalFilename = trashFilename.replace(/^\d{4}-\d{2}-\d{2}_/, "");
+  await writeTextFile(`${blogPath}/source/_posts/${originalFilename}`, content);
+  await remove(`${blogPath}/.trash/${trashFilename}`);
+}
+
+export async function permanentlyDelete(blogPath: string, trashFilename: string): Promise<void> {
+  await remove(`${blogPath}/.trash/${trashFilename}`);
+}
+
+export async function saveImage(blogPath: string, filename: string, base64Data: string): Promise<string> {
+  const imagesDir = `${blogPath}/source/images`;
+  try {
+    await readDir(imagesDir);
+  } catch {
+    await writeTextFile(`${imagesDir}/.gitkeep`, "");
+  }
+  
+  // Convert base64 to binary
+  const base64Content = base64Data.replace(/^data:image\/\w+;base64,/, "");
+  const binaryString = atob(base64Content);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  
+  await writeTextFile(`${imagesDir}/${filename}`, new TextDecoder().decode(bytes));
+  return `/images/${filename}`;
 }
 
 export async function importMarkdownFile(blogPath: string): Promise<{ success: boolean; message: string }> {

@@ -9,6 +9,9 @@ import {
   Moon,
   Sun,
   Folder,
+  BarChart3,
+  Trash2,
+  ExternalLink,
 } from "lucide-react";
 import { runHexoCommand, deployToGitHub, GitHubConfig } from "./utils/blogApi";
 import ArticleList from "./components/ArticleList";
@@ -16,17 +19,20 @@ import ArticleEditor from "./components/ArticleEditor";
 import UpdateLog from "./components/UpdateLog";
 import Settings from "./components/Settings";
 import CategoryManager from "./components/CategoryManager";
+import Dashboard from "./components/Dashboard";
+import TrashManager from "./components/TrashManager";
 import "./App.css";
 
-type View = "articles" | "editor" | "update-log" | "settings" | "categories";
+type View = "dashboard" | "articles" | "editor" | "update-log" | "settings" | "categories" | "trash";
 
 function App() {
-  const [view, setView] = useState<View>("articles");
+  const [view, setView] = useState<View>("dashboard");
   const [editFilename, setEditFilename] = useState<string | null>(null);
   const [blogPath, setBlogPath] = useState("D:\\hickercf_blog\\blog");
   const [darkMode, setDarkMode] = useState(true);
   const [commandOutput, setCommandOutput] = useState("");
   const [runningCommand, setRunningCommand] = useState<string | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   useEffect(() => {
     const saved = localStorage.getItem("blogPath");
@@ -35,7 +41,6 @@ function App() {
     if (savedDark) {
       setDarkMode(savedDark === "true");
     } else {
-      // Default to dark mode
       setDarkMode(true);
     }
   }, []);
@@ -78,7 +83,6 @@ function App() {
     setRunningCommand(command);
     
     if (command === "deploy") {
-      // Check if GitHub config exists
       const savedConfig = localStorage.getItem("githubConfig");
       if (!savedConfig) {
         setCommandOutput("错误：未配置 GitHub 仓库信息\n\n请在【设置】页面配置 GitHub 仓库后再部署。\n");
@@ -100,6 +104,15 @@ function App() {
       } catch (e: any) {
         setCommandOutput((prev) => prev + `部署失败: ${e.message || e}\n`);
       }
+    } else if (command === "server") {
+      setCommandOutput("启动本地预览服务器...\n访问地址：http://localhost:4000\n\n");
+      setPreviewUrl("http://localhost:4000");
+      try {
+        const output = await runHexoCommand(blogPath, "server");
+        setCommandOutput((prev) => prev + output);
+      } catch (e: any) {
+        setCommandOutput((prev) => prev + `错误: ${e.message || e}\n`);
+      }
     } else {
       setCommandOutput(`执行 hexo ${command}...\n`);
       try {
@@ -114,9 +127,11 @@ function App() {
   }
 
   const navItems = [
+    { id: "dashboard" as View, label: "仪表盘", icon: BarChart3 },
     { id: "articles" as View, label: "文章管理", icon: FileText },
     { id: "categories" as View, label: "分类管理", icon: Folder },
     { id: "update-log" as View, label: "更新日志", icon: ClipboardList },
+    { id: "trash" as View, label: "回收站", icon: Trash2 },
     { id: "settings" as View, label: "设置", icon: SettingsIcon },
   ];
 
@@ -162,6 +177,16 @@ function App() {
           >
             <Globe size={16} /> 本地预览
           </button>
+          {previewUrl && (
+            <a
+              href={previewUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="action-button secondary"
+            >
+              <ExternalLink size={16} /> 打开预览
+            </a>
+          )}
         </div>
 
         <div className="sidebar-footer">
@@ -172,6 +197,7 @@ function App() {
       </aside>
 
       <main className="main">
+        {view === "dashboard" && <Dashboard blogPath={blogPath} onEdit={handleEdit} />}
         {view === "articles" && (
           <ArticleList blogPath={blogPath} onEdit={handleEdit} onCreate={handleCreate} />
         )}
@@ -185,6 +211,7 @@ function App() {
             onBack={() => setView("articles")}
           />
         )}
+        {view === "trash" && <TrashManager blogPath={blogPath} />}
         {view === "update-log" && <UpdateLog blogPath={blogPath} />}
         {view === "settings" && <Settings blogPath={blogPath} onChangePath={handleChangePath} />}
 
