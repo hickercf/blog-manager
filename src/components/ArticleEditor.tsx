@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Save, ArrowLeft, Eye, EyeOff, X, Plus, Folder, Type, Clock, Send } from "lucide-react";
-import { getPost, savePost, saveDraft, getCategories, Category, saveImage } from "../utils/blogApi";
+import { getPost, savePost, saveDraft, getCategories, Category, saveImage, sanitizeFilename } from "../utils/blogApi";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -24,8 +24,10 @@ export default function ArticleEditor({ blogPath, filename, onBack }: ArticleEdi
   const [autoSaveStatus, setAutoSaveStatus] = useState("");
   const [wordCount, setWordCount] = useState(0);
   const [readTime, setReadTime] = useState(0);
+  const [autoSaveFilename, setAutoSaveFilename] = useState<string | null>(null);
 
   useEffect(() => {
+    setAutoSaveFilename(null);
     loadExistingCategories();
     if (filename) {
       loadPost();
@@ -93,8 +95,11 @@ export default function ArticleEditor({ blogPath, filename, onBack }: ArticleEdi
   async function handleAutoSave() {
     if (!title && !content) return;
     try {
-      const draftFilename = filename || `_draft_${Date.now()}.md`;
-      await savePost(blogPath, draftFilename, {
+      const draftFilename = filename || autoSaveFilename || `draft-${Date.now()}.md`;
+      if (!autoSaveFilename && !filename) {
+        setAutoSaveFilename(draftFilename);
+      }
+      await saveDraft(blogPath, draftFilename, {
         title: title || "无标题草稿",
         date: date || new Date().toISOString().slice(0, 16).replace("T", " "),
         categories: categories.filter(Boolean),
@@ -110,7 +115,7 @@ export default function ArticleEditor({ blogPath, filename, onBack }: ArticleEdi
 
   async function handleSave() {
     setSaving(true);
-    const newFilename = filename || `${(title || "untitled").replace(/\s+/g, "-").toLowerCase()}.md`;
+    const newFilename = filename || `${sanitizeFilename(title)}.md`;
     await savePost(blogPath, newFilename, {
       title,
       date,

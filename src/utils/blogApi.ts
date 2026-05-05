@@ -1,4 +1,4 @@
-import { readDir, readTextFile, writeTextFile, remove } from "@tauri-apps/plugin-fs";
+import { readDir, readTextFile, writeTextFile, writeFile, mkdir, remove } from "@tauri-apps/plugin-fs";
 import { Command } from "@tauri-apps/plugin-shell";
 import { open } from "@tauri-apps/plugin-dialog";
 
@@ -26,24 +26,52 @@ export interface GitHubConfig {
 }
 
 function parseFrontmatter(content: string): { frontmatter: Record<string, any>; body: string } {
-  const match = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  const normalized = content.replace(/\r\n/g, "\n");
+  const match = normalized.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
   if (!match) {
     return { frontmatter: {}, body: content };
   }
   const fm: Record<string, any> = {};
   const lines = match[1].split("\n");
-  for (const line of lines) {
-    const colonIndex = line.indexOf(":");
-    if (colonIndex > 0) {
-      const key = line.slice(0, colonIndex).trim();
-      let value = line.slice(colonIndex + 1).trim();
-      if (value.startsWith("[") && value.endsWith("]")) {
-        value = value.slice(1, -1);
-        fm[key] = value.split(",").map((v) => v.trim().replace(/['"]/g, ""));
-      } else {
-        fm[key] = value.replace(/['"]/g, "");
-      }
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.startsWith(" ") || line.startsWith("\t")) {
+      i++;
+      continue;
     }
+    const colonIndex = line.indexOf(":");
+    if (colonIndex <= 0) {
+      i++;
+      continue;
+    }
+    const key = line.slice(0, colonIndex).trim();
+    let value = line.slice(colonIndex + 1).trim();
+    if (value.startsWith("[") && value.endsWith("]")) {
+      value = value.slice(1, -1);
+      fm[key] = value.split(",").map((v) => v.trim().replace(/['"]/g, "")).filter(Boolean);
+    } else if (value === "") {
+      const items: string[] = [];
+      let j = i + 1;
+      while (j < lines.length) {
+        const listMatch = lines[j].match(/^\s+-\s+(.*)/);
+        if (listMatch) {
+          items.push(listMatch[1].trim().replace(/['"]/g, ""));
+          j++;
+        } else {
+          break;
+        }
+      }
+      if (items.length > 0) {
+        fm[key] = items;
+        i = j;
+        continue;
+      }
+      fm[key] = "";
+    } else {
+      fm[key] = value.replace(/^['"]|['"]$/g, "");
+    }
+    i++;
   }
   return { frontmatter: fm, body: match[2] };
 }
@@ -53,12 +81,23 @@ function buildFrontmatter(data: Record<string, any>): string {
   for (const [key, value] of Object.entries(data)) {
     if (Array.isArray(value)) {
       lines.push(`${key}: [${value.map((v) => `"${v}"`).join(", ")}]`);
+    } else if (typeof value === "string") {
+      lines.push(`${key}: "${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
     } else {
       lines.push(`${key}: ${value}`);
     }
   }
   lines.push("---", "");
   return lines.join("\n");
+}
+
+export function sanitizeFilename(title: string): string {
+  return (title || "untitled")
+    .replace(/[\\/:*?"<>|]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .toLowerCase() || "untitled";
 }
 
 export async function getPosts(blogPath: string): Promise<Post[]> {
@@ -176,12 +215,7 @@ export async function saveDraft(
     tags: post.tags,
   });
   const fullContent = fm + post.content;
-  try {
-    await readDir(`${blogPath}/source/_drafts`);
-  } catch {
-    // create _drafts directory if it doesn't exist
-    await writeTextFile(`${blogPath}/source/_drafts/.gitkeep`, "");
-  }
+  await mkdir(`${blogPath}/source/_drafts`, { recursive: true });
   await writeTextFile(`${blogPath}/source/_drafts/${filename}`, fullContent);
 }
 
@@ -197,12 +231,7 @@ export async function deletePost(blogPath: string, filename: string): Promise<vo
 
 export async function moveToTrash(blogPath: string, filename: string): Promise<void> {
   const trashDir = `${blogPath}/.trash`;
-  try {
-    await readDir(trashDir);
-  } catch {
-    // trash dir doesn't exist, create it
-    await writeTextFile(`${trashDir}/.gitkeep`, "");
-  }
+  await mkdir(trashDir, { recursive: true });
   const content = await readTextFile(`${blogPath}/source/_posts/${filename}`);
   const timestamp = new Date().toISOString().slice(0, 10);
   const trashFilename = `${timestamp}_${filename}`;
@@ -246,21 +275,16 @@ export async function permanentlyDelete(blogPath: string, trashFilename: string)
 
 export async function saveImage(blogPath: string, filename: string, base64Data: string): Promise<string> {
   const imagesDir = `${blogPath}/source/images`;
-  try {
-    await readDir(imagesDir);
-  } catch {
-    await writeTextFile(`${imagesDir}/.gitkeep`, "");
-  }
-  
-  // Convert base64 to binary
+  await mkdir(imagesDir, { recursive: true });
+
   const base64Content = base64Data.replace(/^data:image\/\w+;base64,/, "");
   const binaryString = atob(base64Content);
   const bytes = new Uint8Array(binaryString.length);
   for (let i = 0; i < binaryString.length; i++) {
     bytes[i] = binaryString.charCodeAt(i);
   }
-  
-  await writeTextFile(`${imagesDir}/${filename}`, new TextDecoder().decode(bytes));
+
+  await writeFile(`${imagesDir}/${filename}`, bytes);
   return `/images/${filename}`;
 }
 
@@ -362,17 +386,13 @@ export async function saveUpdateLog(blogPath: string, content: string): Promise<
 }
 
 export async function runHexoCommand(blogPath: string, command: string): Promise<string> {
-  let cmd;
-  
   try {
-    // Method 1: Use cmd.exe to run local hexo
-    cmd = Command.create("cmd", ["/c", `node_modules\\.bin\\hexo.cmd ${command}`], { cwd: blogPath });
+    const cmd = Command.create("cmd", ["/c", `node_modules\\.bin\\hexo.cmd ${command}`], { cwd: blogPath });
     const output = await cmd.execute();
     return output.stdout + output.stderr;
   } catch (e: any) {
     try {
-      // Method 2: Use cmd.exe to run npx hexo
-      cmd = Command.create("cmd", ["/c", `npx hexo ${command}`], { cwd: blogPath });
+      const cmd = Command.create("cmd", ["/c", `npx hexo ${command}`], { cwd: blogPath });
       const output = await cmd.execute();
       return output.stdout + output.stderr;
     } catch (e2: any) {
@@ -381,50 +401,70 @@ export async function runHexoCommand(blogPath: string, command: string): Promise
   }
 }
 
-export async function configureGitHubDeploy(blogPath: string, config: GitHubConfig): Promise<void> {
+async function injectDeployToken(blogPath: string, config: GitHubConfig): Promise<void> {
   const configPath = `${blogPath}\\_config.yml`;
-  let content = "";
+  const content = await readTextFile(configPath);
+
+  const repoWithToken = `https://${config.token}@github.com/${config.username}/${config.repo}.git`;
+
+  const updated = content.replace(
+    /repo:\s*.*/g,
+    `repo: ${repoWithToken}`
+  );
+
+  if (updated === content) {
+    const deploySection = `deploy:\n  type: git\n  repo: ${repoWithToken}\n  branch: ${config.branch}`;
+    const deployRegex = /deploy:\s*\n[\s\S]*?(?=\n\w|$)/;
+    if (deployRegex.test(updated)) {
+      await writeTextFile(configPath, updated.replace(deployRegex, deploySection));
+      return;
+    }
+    await writeTextFile(configPath, updated.trimEnd() + "\n\n" + deploySection + "\n");
+    return;
+  }
+
+  await writeTextFile(configPath, updated);
+}
+
+async function removeDeployToken(blogPath: string): Promise<void> {
+  const configPath = `${blogPath}\\_config.yml`;
   try {
-    content = await readTextFile(configPath);
-  } catch (e: any) {
-    throw new Error(`无法读取 _config.yml\n路径: ${configPath}\n错误: ${e.message || e}`);
+    const content = await readTextFile(configPath);
+    const cleaned = content.replace(
+      /repo:\s*https:\/\/[^@]+@github\.com\/(.*)/g,
+      "repo: https://github.com/$1"
+    );
+    if (cleaned !== content) {
+      await writeTextFile(configPath, cleaned);
+    }
+  } catch {
+    // ignore cleanup errors
   }
-
-  const deployConfig = `deploy:
-  type: git
-  repo: https://${config.token}@github.com/${config.username}/${config.repo}.git
-  branch: ${config.branch}`;
-
-  const deployRegex = /deploy:\s*\n[\s\S]*?(?=\n\w|$)/;
-  if (deployRegex.test(content)) {
-    content = content.replace(deployRegex, deployConfig);
-  } else {
-    content = content.trim() + "\n\n" + deployConfig;
-  }
-
-  await writeTextFile(configPath, content);
 }
 
 export async function deployToGitHub(blogPath: string, config: GitHubConfig): Promise<string> {
   let output = "";
-  
-  // Step 1: Configure GitHub deploy
-  output += "正在配置 GitHub 部署...\n";
-  await configureGitHubDeploy(blogPath, config);
-  output += "✓ GitHub 配置已更新\n\n";
-  
-  // Step 2: Generate static files
-  output += "正在生成静态文件...\n";
-  const generateOutput = await runHexoCommand(blogPath, "generate");
-  output += generateOutput + "\n";
-  
-  // Step 3: Deploy
-  output += "正在部署到 GitHub...\n";
-  const deployOutput = await runHexoCommand(blogPath, "deploy");
-  output += deployOutput + "\n";
-  
-  output += "✓ 部署完成！\n";
-  output += `访问地址：https://${config.username}.github.io/${config.repo === `${config.username}.github.io` ? "" : config.repo}\n`;
-  
+
+  output += "正在注入部署凭证...\n";
+  await injectDeployToken(blogPath, config);
+  output += "✓ 凭证已临时注入\n\n";
+
+  try {
+    output += "正在清理缓存...\n";
+    output += await runHexoCommand(blogPath, "clean") + "\n";
+
+    output += "正在生成静态文件...\n";
+    output += await runHexoCommand(blogPath, "generate") + "\n";
+
+    output += "正在部署到 GitHub...\n";
+    output += await runHexoCommand(blogPath, "deploy") + "\n";
+
+    output += "✓ 部署完成！\n";
+    output += `访问地址：https://${config.username}.github.io/${config.repo === `${config.username}.github.io` ? "" : config.repo}\n`;
+  } finally {
+    await removeDeployToken(blogPath);
+    output += "\n✓ 部署凭证已自动清除\n";
+  }
+
   return output;
 }

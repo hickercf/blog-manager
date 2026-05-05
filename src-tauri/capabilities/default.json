@@ -28,11 +28,6 @@
         },
         {
           "args": true,
-          "cmd": "hexo",
-          "name": "hexo"
-        },
-        {
-          "args": true,
           "cmd": "npx",
           "name": "npx"
         },
@@ -45,16 +40,6 @@
           "args": true,
           "cmd": "node",
           "name": "node"
-        },
-        {
-          "args": true,
-          "cmd": "D:\\hickercf_blog\\blog\\node_modules\\.bin\\hexo.cmd",
-          "name": "hexo-local"
-        },
-        {
-          "args": true,
-          "cmd": "D:\\hickercf_blog\\blog\\node_modules\\.bin\\npx.cmd",
-          "name": "npx-local"
         }
       ]
     }
